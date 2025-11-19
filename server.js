@@ -16,10 +16,12 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
+    origin: ["http://localhost:5173", "https://chat-frontend1.netlify.app"],
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
+
 
 // Middleware
 app.use(cors());
