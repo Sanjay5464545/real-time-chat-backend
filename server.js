@@ -4,12 +4,16 @@ const http = require('http');
 const socketIo = require('socket.io');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const { Expo } = require('expo-server-sdk');
 require('dotenv').config();
 
 // Import Models
 const Message = require('./models/Message');
 const Room = require('./models/Room');
 const User = require('./models/User');
+
+// Create Expo SDK instance for push notifications
+const expo = new Expo();
 
 // Create Express app
 const app = express();
@@ -21,7 +25,6 @@ const io = socketIo(server, {
     credentials: true
   }
 });
-
 
 // Middleware
 app.use(cors());
@@ -37,12 +40,21 @@ app.get('/', (req, res) => {
   res.send('Chat Server is Running! 🚀');
 });
 
-// Store online users
+// Store online users with push tokens
 const onlineUsers = {};
 
 // Socket.io Connection
 io.on('connection', (socket) => {
-  console.log('🟢 New user connected:', socket.id);
+  console.log('🔌 New user connected:', socket.id);
+
+  // Event: Register push token
+  socket.on('registerPushToken', ({ pushToken }) => {
+    socket.pushToken = pushToken;
+    if (onlineUsers[socket.id]) {
+      onlineUsers[socket.id].pushToken = pushToken;
+    }
+    console.log('🔔 Push token registered:', pushToken);
+  });
 
   // Event 1: User joins a room
   socket.on('joinRoom', async ({ username, room }) => {
@@ -52,7 +64,12 @@ io.on('connection', (socket) => {
       socket.room = room;
 
       // Add user to online users
-      onlineUsers[socket.id] = { username, room, socketId: socket.id };
+      onlineUsers[socket.id] = { 
+        username, 
+        room, 
+        socketId: socket.id,
+        pushToken: socket.pushToken || null
+      };
 
       // Get online users in this room
       const roomUsers = Object.values(onlineUsers).filter(user => user.room === room);
@@ -68,7 +85,7 @@ io.on('connection', (socket) => {
         username: 'System',
         message: `${username} has joined the room`,
         timestamp: new Date(),
-        isSystem: true  // FIXED: Added this line
+        isSystem: true
       });
 
       // Send updated online users list to everyone in the room
@@ -80,7 +97,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Event 2: Send message
+  // Event 2: Send message with push notifications
   socket.on('sendMessage', async ({ username, room, message }) => {
     try {
       // Save message to database
@@ -100,7 +117,44 @@ io.on('connection', (socket) => {
         timestamp: newMessage.timestamp
       });
 
-      console.log(`📨 ${username} sent message in ${room}: ${message}`);
+      console.log(`💬 ${username} sent message in ${room}: ${message}`);
+
+      // Send push notifications to users in the room (except sender)
+      const roomUsers = Object.values(onlineUsers).filter(
+        user => user.room === room && user.username !== username && user.pushToken
+      );
+
+      if (roomUsers.length > 0) {
+        const notifications = [];
+        
+        for (let user of roomUsers) {
+          // Check if push token is valid
+          if (!Expo.isExpoPushToken(user.pushToken)) {
+            console.error(`❌ Invalid push token: ${user.pushToken}`);
+            continue;
+          }
+
+          notifications.push({
+            to: user.pushToken,
+            sound: 'default',
+            title: `${username} in ${room}`,
+            body: message,
+            data: { room, username }
+          });
+        }
+
+        // Send notifications in chunks
+        const chunks = expo.chunkPushNotifications(notifications);
+        
+        for (let chunk of chunks) {
+          try {
+            await expo.sendPushNotificationsAsync(chunk);
+            console.log('🔔 Push notifications sent!');
+          } catch (error) {
+            console.error('❌ Error sending push notifications:', error);
+          }
+        }
+      }
     } catch (error) {
       console.error('Error sending message:', error);
     }
@@ -129,13 +183,13 @@ io.on('connection', (socket) => {
         username: 'System',
         message: `${username} has left the room`,
         timestamp: new Date(),
-        isSystem: true  // FIXED: Added this line
+        isSystem: true
       });
 
       // Send updated online users list
       io.to(room).emit('onlineUsers', roomUsers);
 
-      console.log(`🔴 ${username} disconnected from ${room}`);
+      console.log(`👋 ${username} disconnected from ${room}`);
     }
   });
 });
